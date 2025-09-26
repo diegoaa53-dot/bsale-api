@@ -1,22 +1,25 @@
-import requests
-import pandas as pd
+from api_client import fetch_bsale_data
+from utils import save_jsonlist_to_csv, ensure_data_dir
+import os
 
-# ⚡ Pega aquí tu token de Bsale
-TOKEN = "TU_TOKEN_DE_BSALE"
-BASE_URL = "https://api.bsale.cl/v1"
+DATA_DIR = "data"
+ensure_data_dir(DATA_DIR)
 
-headers = {
-    "access_token": TOKEN
+RESOURCES = {
+    "documents": os.path.join(DATA_DIR, "ventas.csv"),
+    "products": os.path.join(DATA_DIR, "productos.csv"),
+    "stocks": os.path.join(DATA_DIR, "stock.csv"),
+    "offices": os.path.join(DATA_DIR, "sucursales.csv"),
 }
 
-# Ejemplo: obtener productos
-url = f"{BASE_URL}/products.json"
-response = requests.get(url, headers=headers)
+def main():
+    for endpoint, out_path in RESOURCES.items():
+        print(f"\n🔎 Descargando {endpoint} ...")
+        try:
+            items = fetch_bsale_data(endpoint)
+            save_jsonlist_to_csv(items, out_path)
+        except Exception as e:
+            print(f"❌ Error al descargar {endpoint}: {e}")
 
-if response.status_code == 200:
-    data = response.json()
-    df = pd.DataFrame(data['items'])
-    df.to_csv("productos.csv", index=False, encoding="utf-8-sig")
-    print("✅ Productos exportados a productos.csv")
-else:
-    print("❌ Error:", response.status_code, response.text)
+if __name__ == "__main__":
+    main()
