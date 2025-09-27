@@ -1,35 +1,45 @@
 import os
 import pandas as pd
 from pandas import json_normalize
-from datetime import datetime
 
+# Cargar catálogos y dim_variant (con costos)
+try:
+    from .catalogs import get_all_maps     # cuando corres: python -m src.main
+except ImportError:
+    from catalogs import get_all_maps      # fallback si ejecutaras archivos sueltos
+
+# --------------------- Helpers ---------------------
 
 def ensure_data_dir(path: str = "data"):
     os.makedirs(path, exist_ok=True)
 
+def _as_series(df: pd.DataFrame, col: str, index) -> pd.Series:
+    s = df.get(col)
+    if s is None:
+        return pd.Series([pd.NA] * len(index), index=index)
+    return s.reindex(index)
 
-def _fmt_date(unix_series):
-    """Convierte unix (segundos) a dd/mm/YYYY; tolera None/objetos."""
-    try:
-        dt = pd.to_datetime(unix_series, unit="s", errors="coerce")
-        return dt.dt.strftime("%d/%m/%Y")
-    except Exception:
-        return pd.Series([None] * len(unix_series)) if hasattr(unix_series, "__len__") else None
+def _as_num(df_or_series, col_or_series, index) -> pd.Series:
+    if isinstance(col_or_series, pd.Series):
+        s = col_or_series
+    else:
+        s = _as_series(df_or_series, col_or_series, index)
+    return pd.to_numeric(s, errors="coerce").astype(float).fillna(0.0)
 
+def _fmt_date(unix_series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(unix_series, unit="s", errors="coerce")
+    return dt.dt.strftime("%d/%m/%Y")
 
-def _fmt_datetime(unix_series):
-    """Convierte unix (segundos) a dd/mm/YYYY HH:MM:SS; tolera None/objetos."""
-    try:
-        dt = pd.to_datetime(unix_series, unit="s", errors="coerce")
-        return dt.dt.strftime("%d/%m/%Y %H:%M:%S")
-    except Exception:
-        return pd.Series([None] * len(unix_series)) if hasattr(unix_series, "__len__") else None
+def _fmt_datetime(unix_series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(unix_series, unit="s", errors="coerce")
+    return dt.dt.strftime("%d/%m/%Y %H:%M:%S")
 
+# --------------------- Reporte de Ventas ---------------------
 
 def build_reporte_ventas(documents: list[dict], out_csv: str):
     """
-    Genera un CSV con los encabezados del reporte de ventas (detalle por ítem)
-    que nos pasaste. REQUIERE extraer documents con:
+    Genera un CSV con los encabezados del reporte de ventas (detalle por ítem).
+    Requiere extraer documents con:
       expand=details,client,office,user,coin,priceList
     """
     ensure_data_dir(os.path.dirname(out_csv) or "data")
@@ -39,207 +49,221 @@ def build_reporte_ventas(documents: list[dict], out_csv: str):
         print("⚠️ No llegaron documentos.")
         return
 
-    # ---------- Aplanar items ----------
+    # Aplanar items (cada fila = un detalle)
     df_items = json_normalize(
         documents,
         record_path=["details", "items"],
         meta=[
-            "id", "number", "serialNumber", "emissionDate", "documentTypeId", "trackingNumber", "token",
-            ["client", "firstName"], ["client", "lastName"], ["client", "company"], ["client", "code"], ["client", "email"],
+            "id", "number", "serialNumber", "emissionDate", "documentTypeId",
+            "trackingNumber", "token",
+            ["client", "firstName"], ["client", "lastName"], ["client", "company"],
+            ["client", "code"], ["client", "email"],
             ["client", "address"], ["client", "municipality"], ["client", "city"],
-            ["office", "name"], ["user", "name"], ["coin", "code"], ["priceList", "name"],
+            ["office", "name"],
+            ["user", "id"], ["user", "name"],
+            ["coin", "code"],
+            ["priceList", "id"], ["priceList", "name"],
+            ["variant", "id"], ["variant", "code"], ["variant", "description"],
         ],
         sep=".",
         errors="ignore",
         meta_prefix="doc."
     )
 
-    # ---------- Construir dataframe final con tus columnas (y orden) ----------
-    cols = {
-        "Tipo Movimiento": "venta",
-        "Tipo de Documento": None,         # luego podemos hacer lookup al nombre por documentTypeId
-        "Numero Documento": "doc.number",
-        "Fecha de Emisión": None,          # derivado de doc.emissionDate
-        "Tracking number": None,           # trackingNumber o token
-        "Fecha y Hora Venta": None,        # derivado de doc.emissionDate
-        "Sucursal": "doc.office.name",
-        "Vendedor": "doc.user.name",
-        "Nombre Cliente": None,            # company o nombre+apellido
-        "Cliente RUT": "doc.client.code",
-        "Email Cliente": "doc.client.email",
-        "Cliente Dirección": "doc.client.address",
-        "Cliente Comuna": "doc.client.municipality",
-        "Cliente Ciudad": "doc.client.city",
-        "Lista de Precio": "doc.priceList.name",
-        "Tipo de entrega": "",             # no disponible en documents
-        "Moneda": "doc.coin.code",
-        "Tipo de Producto / Servicio": 0,  # en tu muestra es 0
-        "SKU": "variant.code",
-        "Producto / Servicio": "variant.description",
-        "Variante": "",
-        "Otros Atributos": "",
-        "Marca": "",
-        "Detalle de Productos/Servicios Pack/Promo": "",
-        "Precio de Lista": None,           # si no viene, fallback = totalUnitValue
-        "Precio Neto Unitario": "netUnitValue",
-        "Precio Bruto Unitario": "totalUnitValue",
-        "Cantidad": "quantity",
-        "Venta Total Neta": "netAmount",
-        "Total Impuestos": "taxAmount",
-        "Venta Total Bruta": "totalAmount",
-        "Nombre de dcto": "",
-        "Descuento Neto": "netDiscount",
-        "Descuento Bruto": "totalDiscount",
-        "% Descuento": None,               # derivado
-        "Costo neto unitario": "",
-        "Costo Total Neto": "",
-        "Margen": "",
-        "% Margen": "",
-    }
+    # ------- Catálogos y dim_variant -------
+    doc_type_map, user_map, price_list_map, office_map, dim_variant = get_all_maps(refresh=False)
+    idx = df_items.index
 
-    out = pd.DataFrame(index=df_items.index)
+    # Lookups nombres
+    doc_type_name = _as_series(df_items, "doc.documentTypeId", idx).map(
+        lambda x: doc_type_map.get(int(x), "") if pd.notna(x) else ""
+    )
+    user_name_from_map = _as_series(df_items, "doc.user.id", idx).map(
+        lambda x: user_map.get(int(x), "") if pd.notna(x) else ""
+    )
+    pricelist_name_from_map = _as_series(df_items, "doc.priceList.id", idx).map(
+        lambda x: price_list_map.get(int(x), "") if pd.notna(x) else ""
+    )
 
-    # Cargar columnas directas / constantes
-    for col, src in cols.items():
-        if src is None:
-            out[col] = ""   # las completamos después
-        elif src == "":
-            out[col] = ""
-        elif isinstance(src, (int, float)):
-            out[col] = src
-        else:
-            out[col] = df_items.get(src, "")
+    # dim_variant por join (por id o por sku como fallback)
+    # Primero intentamos por variant.id
+    var_id_series = _as_series(df_items, "doc.variant.id", idx)
+    joined = pd.DataFrame({"__row__": idx})
+    joined["variant_id"] = pd.to_numeric(var_id_series, errors="coerce")
 
-    # ---------- Derivados / limpiezas ----------
-    # Tipo de Documento: por ahora dejamos el ID
-    out["Tipo de Documento"] = df_items.get("doc.documentTypeId", "")
+    dim = dim_variant.copy()
+    # Merge por variant_id
+    joined = joined.merge(dim, how="left", on="variant_id")
+
+    # Fallback: si cost_net_unit quedó NaN, intentar por SKU
+    missing_cost_mask = joined["cost_net_unit"].isna() | (joined["cost_net_unit"] == 0)
+    if missing_cost_mask.any():
+        sku_series = _as_series(df_items, "doc.variant.code", idx).astype(str)
+        dim_by_sku = dim_variant[["sku", "cost_net_unit"]].dropna()
+        joined.loc[missing_cost_mask, "sku"] = sku_series[missing_cost_mask]
+        joined = joined.merge(dim_by_sku.rename(columns={"cost_net_unit": "cost_by_sku"}),
+                              how="left", on="sku")
+        # si cost_net_unit es 0/NaN y cost_by_sku existe, úsala
+        joined["cost_net_unit"] = joined["cost_net_unit"].fillna(0.0)
+        joined["cost_net_unit"] = joined["cost_net_unit"].where(joined["cost_net_unit"] > 0,
+                                                                joined["cost_by_sku"].fillna(0.0))
+    # Serie costo final alineada
+    cost_unit_variant = joined.set_index("__row__")["cost_net_unit"].reindex(idx).fillna(0.0)
+
+    # Columnas y orden final (tus encabezados)
+    cols = [
+        "Tipo Movimiento",
+        "Tipo de Documento",
+        "Numero Documento",
+        "Fecha de Emisión",
+        "Tracking number",
+        "Fecha y Hora Venta",
+        "Sucursal",
+        "Vendedor",
+        "Nombre Cliente",
+        "Cliente RUT",
+        "Email Cliente",
+        "Cliente Dirección",
+        "Cliente Comuna",
+        "Cliente Ciudad",
+        "Lista de Precio",
+        "Tipo de entrega",
+        "Moneda",
+        "Tipo de Producto / Servicio",
+        "SKU",
+        "Producto / Servicio",
+        "Variante",
+        "Otros Atributos",
+        "Marca",
+        "Detalle de Productos/Servicios Pack/Promo",
+        "Precio de Lista",
+        "Precio Neto Unitario",
+        "Precio Bruto Unitario",
+        "Cantidad",
+        "Venta Total Neta",
+        "Total Impuestos",
+        "Venta Total Bruta",
+        "Nombre de dcto",
+        "Descuento Neto",
+        "Descuento Bruto",
+        "% Descuento",
+        "Costo neto unitario",
+        "Costo Total Neto",
+        "Margen",
+        "% Margen",
+    ]
+
+    out = pd.DataFrame(index=idx, columns=cols)
+
+    # Constantes
+    out["Tipo Movimiento"] = "venta"
+    out["Tipo de entrega"] = ""
+    out["Variante"] = ""
+    out["Otros Atributos"] = ""
+    out["Marca"] = ""
+    out["Detalle de Productos/Servicios Pack/Promo"] = ""
+    out["Nombre de dcto"] = ""
+    out["Tipo de Producto / Servicio"] = 0
+
+    # Directos / enriquecidos
+    out["Numero Documento"]  = _as_series(df_items, "doc.number", idx)
+
+    suc = _as_series(df_items, "doc.office.name", idx)
+    out["Sucursal"] = suc  # si quieres fallback por office_id + office_map, se puede agregar
+
+    # Vendedor: expand.name -> users map
+    vend_expand = _as_series(df_items, "doc.user.name", idx)
+    vend = vend_expand.where(~vend_expand.isna() & (vend_expand != ""), user_name_from_map)
+    out["Vendedor"] = vend.fillna("")
+
+    # Cliente
+    out["Cliente RUT"]       = _as_series(df_items, "doc.client.code", idx)
+    out["Email Cliente"]     = _as_series(df_items, "doc.client.email", idx)
+    out["Cliente Dirección"] = _as_series(df_items, "doc.client.address", idx)
+    out["Cliente Comuna"]    = _as_series(df_items, "doc.client.municipality", idx)
+    out["Cliente Ciudad"]    = _as_series(df_items, "doc.client.city", idx)
+    comp  = _as_series(df_items, "doc.client.company", idx)
+    first = _as_series(df_items, "doc.client.firstName", idx).fillna("")
+    last  = _as_series(df_items, "doc.client.lastName", idx).fillna("")
+    full  = (first + " " + last).str.strip()
+    out["Nombre Cliente"] = comp.where(~comp.isna() & (comp != ""), full)
+
+    # Lista de precio: expand.name -> price_lists map
+    lp_expand = _as_series(df_items, "doc.priceList.name", idx)
+    lp = lp_expand.where(~lp_expand.isna() & (lp_expand != ""), pricelist_name_from_map)
+    out["Lista de Precio"] = lp.fillna("")
+
+    # Moneda
+    out["Moneda"] = _as_series(df_items, "doc.coin.code", idx).replace("", "CLP")
+
+    # Tipo de Documento: nombre por map; si falta, ID como string
+    tipo_doc_name = doc_type_name
+    falta = tipo_doc_name.isna() | (tipo_doc_name == "")
+    tipo_doc_name = tipo_doc_name.where(~falta, _as_series(df_items, "doc.documentTypeId", idx).astype("Int64").astype(str))
+    out["Tipo de Documento"] = tipo_doc_name.fillna("")
 
     # Fechas
-    em = df_items.get("doc.emissionDate")
-    out["Fecha de Emisión"] = _fmt_date(em)
+    em = _as_series(df_items, "doc.emissionDate", idx)
+    out["Fecha de Emisión"]   = _fmt_date(em)
     out["Fecha y Hora Venta"] = _fmt_datetime(em)
 
-    # Tracking: combinar trackingNumber con token (sin usar `or` sobre Series)
-    track = df_items.get("doc.trackingNumber")
-    tok = df_items.get("doc.token")
-
-    if track is None:
-        track = pd.Series([pd.NA] * len(out), index=out.index)
-    else:
-        track = track.reindex(out.index)
-
-    if tok is None:
-        tok = pd.Series([pd.NA] * len(out), index=out.index)
-    else:
-        tok = tok.reindex(out.index)
-
+    # Tracking: trackingNumber -> token -> ""
+    track = _as_series(df_items, "doc.trackingNumber", idx)
+    tok   = _as_series(df_items, "doc.token", idx)
     out["Tracking number"] = track.fillna(tok).fillna("")
 
-    # Nombre Cliente: company o nombre+apellido
-    comp = df_items.get("doc.client.company")
-    first = df_items.get("doc.client.firstName")
-    last = df_items.get("doc.client.lastName")
-    full = ((first.fillna("") + " " + last.fillna("")).str.strip()) if (first is not None and last is not None) else None
-    out["Nombre Cliente"] = (comp.fillna(full) if (comp is not None and full is not None) else (comp or full or ""))
+    # Detalle (ítem)
+    out["SKU"]                 = _as_series(df_items, "doc.variant.code", idx)
+    out["Producto / Servicio"] = _as_series(df_items, "doc.variant.description", idx)
 
-    # Moneda: default CLP si viene vacía
-    out["Moneda"] = out["Moneda"].replace("", "CLP")
+    # Númericos (línea)
+    out["Precio Neto Unitario"]  = _as_num(df_items, "netUnitValue", idx)
+    out["Precio Bruto Unitario"] = _as_num(df_items, "totalUnitValue", idx)
+    out["Cantidad"]              = _as_num(df_items, "quantity", idx)
+    out["Venta Total Neta"]      = _as_num(df_items, "netAmount", idx)
+    out["Total Impuestos"]       = _as_num(df_items, "taxAmount", idx)
+    out["Venta Total Bruta"]     = _as_num(df_items, "totalAmount", idx)
+    out["Descuento Neto"]        = _as_num(df_items, "netDiscount", idx)
+    out["Descuento Bruto"]       = _as_num(df_items, "totalDiscount", idx)
 
-    # Precio de Lista: convertir "" -> NaN y luego rellenar con Bruto Unitario
-    bruto_u = pd.to_numeric(
-        df_items.get("totalUnitValue", pd.Series([pd.NA] * len(out), index=out.index)),
-        errors="coerce"
-    ).reindex(out.index)
-    pl = out["Precio de Lista"]
-    if pl.dtype == "O":
-        pl = pl.replace("", pd.NA)
-    pl = pd.to_numeric(pl, errors="coerce")
-    out["Precio de Lista"] = pl.fillna(bruto_u)
+    # Precio de Lista (si no hay, fallback = bruto unitario)
+    pl_raw = _as_series(df_items, "listPrice", idx)  # si no existe, NA
+    pl = pd.to_numeric(pl_raw.replace("", pd.NA), errors="coerce")
+    out["Precio de Lista"] = pl.fillna(out["Precio Bruto Unitario"])
 
-    # % Descuento (evita div/0)
-    net_disc = pd.to_numeric(df_items.get("netDiscount", 0), errors="coerce").fillna(0)
-    tot_disc = pd.to_numeric(df_items.get("totalDiscount", 0), errors="coerce").fillna(0)
-    tot_linea = pd.to_numeric(df_items.get("totalAmount", 0), errors="coerce").fillna(0)
-    base = (tot_linea + tot_disc).replace(0, pd.NA)
-    pct = ((tot_disc / base) * 100).round(0).fillna(0).astype(int).astype(str) + "%"
-    out["% Descuento"] = pct
+    # % Descuento robusto
+    base = out["Venta Total Bruta"] + out["Descuento Bruto"]
+    pct = pd.Series(0.0, index=idx, dtype=float)
+    mask = base > 0
+    pct.loc[mask] = (out["Descuento Bruto"][mask] / base[mask]) * 100.0
+    out["% Descuento"] = pct.round(0).astype("Int64").astype(str) + "%"
 
-    # Orden final de columnas
-    out = out[list(cols.keys())]
+    # -------- Costos y margen --------
+    out["Costo neto unitario"] = pd.to_numeric(cost_unit_variant, errors="coerce").fillna(0.0)
+    out["Costo Total Neto"]    = (out["Costo neto unitario"] * out["Cantidad"]).round(0)
 
+    # Margen = Venta Total Neta - Costo Total Neto (sin IVA)
+    out["Margen"] = (out["Venta Total Neta"] - out["Costo Total Neto"]).round(0)
+
+    # % Margen = Margen / Venta Total Neta
+    m_pct = pd.Series(0.0, index=idx, dtype=float)
+    mask2 = out["Venta Total Neta"] > 0
+    m_pct.loc[mask2] = (out["Margen"][mask2] / out["Venta Total Neta"][mask2]) * 100.0
+    out["% Margen"] = m_pct.round(0).astype("Int64").astype(str) + "%"
+
+    # Validación simple de montos (opcional)
+    calc_bruta = (out["Cantidad"] * out["Precio Bruto Unitario"])
+    diff = (out["Venta Total Bruta"] - calc_bruta).abs()
+    tol = (calc_bruta.abs() * 0.01) + 1.0  # 1% + 1 CLP
+    warn = diff > tol
+    if warn.any():
+        out["_warn_monto"] = warn.map(lambda x: "REVISA" if x else "")
+
+    # Orden final y export
+    cols = [c for c in out.columns if c != "_warn_monto"]
+    if "_warn_monto" in out.columns:
+        cols = cols + ["_warn_monto"]
+
+    out = out[cols]
     out.to_csv(out_csv, index=False, encoding="utf-8-sig")
     print(f"✅ Reporte generado en {out_csv} — {len(out)} filas")
-
-
-def save_documents_to_csvs(documents, base_dir="data"):
-    """
-    Utilidad alternativa: guarda cabecera y detalle "tal cual" sin esquema de reporte.
-    - data/ventas.csv
-    - data/ventas_detalle.csv
-    """
-    os.makedirs(base_dir, exist_ok=True)
-
-    if not documents:
-        print("⚠️  No llegaron documentos para guardar")
-        pd.DataFrame().to_csv(os.path.join(base_dir, "ventas.csv"), index=False, encoding="utf-8-sig")
-        pd.DataFrame().to_csv(os.path.join(base_dir, "ventas_detalle.csv"), index=False, encoding="utf-8-sig")
-        return
-
-    # Cabecera
-    df_head = json_normalize(documents, sep=".")
-    if "emissionDate" in df_head.columns:
-        try:
-            df_head["emissionDate_dt"] = pd.to_datetime(df_head["emissionDate"], unit="s", errors="ignore")
-        except Exception:
-            pass
-
-    head_path = os.path.join(base_dir, "ventas.csv")
-    df_head.to_csv(head_path, index=False, encoding="utf-8-sig")
-    print(f"✅ Guardado {head_path} — {len(df_head)} filas")
-
-    # Detalle
-    try:
-        df_det = json_normalize(
-            documents,
-            record_path=["details", "items"],
-            meta=[["id"], ["number"], "emissionDate",
-                  ["client", "firstName"], ["client", "lastName"], ["client", "company"],
-                  ["office", "name"]],
-            sep=".",
-            errors="ignore",
-            meta_prefix="document."
-        )
-        rename_map = {
-            "document.id": "documentId",
-            "document.number": "documentNumber",
-            "document.client.firstName": "client.firstName",
-            "document.client.lastName": "client.lastName",
-            "document.client.company": "client.company",
-            "document.office.name": "office.name",
-            "document.emissionDate": "emissionDate"
-        }
-        df_det.rename(columns=rename_map, inplace=True, errors="ignore")
-        if "emissionDate" in df_det.columns:
-            try:
-                df_det["emissionDate_dt"] = pd.to_datetime(df_det["emissionDate"], unit="s", errors="ignore")
-            except Exception:
-                pass
-
-        detail_path = os.path.join(base_dir, "ventas_detalle.csv")
-        df_det.to_csv(detail_path, index=False, encoding="utf-8-sig")
-        print(f"✅ Guardado {detail_path} — {len(df_det)} filas")
-    except Exception as e:
-        detail_path = os.path.join(base_dir, "ventas_detalle.csv")
-        pd.DataFrame().to_csv(detail_path, index=False, encoding="utf-8-sig")
-        print(f"⚠️  No se pudo aplanar details.items → {e}. Guardé un archivo vacío en ventas_detalle.csv")
-
-
-def save_jsonlist_to_csv(json_list, filename):
-    ensure_data_dir(os.path.dirname(filename) or "data")
-    if not json_list:
-        pd.DataFrame().to_csv(filename, index=False, encoding="utf-8-sig")
-        print(f"⚠️  No hay datos para {filename}")
-        return
-    df = json_normalize(json_list, sep=".")
-    df.to_csv(filename, index=False, encoding="utf-8-sig")
-    print(f"✅ Guardado {filename} — {len(df)} filas")

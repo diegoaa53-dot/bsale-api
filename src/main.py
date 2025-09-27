@@ -9,10 +9,10 @@ DATA_DIR = "data"
 ensure_data_dir(DATA_DIR)
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Reporte de Ventas estilo Bsale (detalle por ítem)")
-    p.add_argument("--since", type=str, help="YYYY-MM-DD")
-    p.add_argument("--until", type=str, help="YYYY-MM-DD")
-    p.add_argument("--limit", type=int, default=50, help="tamaño de página (máx 50)")
+    p = argparse.ArgumentParser(description="Reporte de Ventas (detalle por ítem) estilo Bsale")
+    p.add_argument("--since", type=str, help="YYYY-MM-DD (inicio)")
+    p.add_argument("--until", type=str, help="YYYY-MM-DD (fin)")
+    p.add_argument("--limit", type=int, default=50, help="tamaño de página (máx 50 en Bsale)")
     p.add_argument("--debug", action="store_true")
     return p.parse_args()
 
@@ -31,11 +31,11 @@ def _to_unix_day_bounds(since_str: str | None, until_str: str | None):
 
 def main():
     args = parse_args()
+
     params = {
         "limit": args.limit,
-        # relaciones necesarias para el reporte
+        # Traemos lo necesario para el reporte
         "expand": "details,client,office,user,coin,priceList",
-        # campos útiles
         "fields": (
             "[id,number,serialNumber,emissionDate,documentTypeId,trackingNumber,token,"
             "netAmount,taxAmount,totalAmount,discountAmount,"
@@ -45,6 +45,8 @@ def main():
     if args.since or args.until:
         s, e = _to_unix_day_bounds(args.since, args.until)
         params["emissiondaterange"] = f"[{s},{e}]"
+    else:
+        print("⚠️  Sin --since/--until en documents: podrías traer MUCHOS registros.")
 
     print("🔎 Descargando documents ...")
     docs = fetch_bsale_data("documents", params=params, start_page=1)
