@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.getenv("BSALE_BASE_URL", "https://api.bsale.cl/v1")
+BASE_URL = os.getenv("BSALE_BASE_URL", "https://api.bsale.io/v1")
 TOKEN = os.getenv("BSALE_TOKEN")
 
 if not TOKEN:
